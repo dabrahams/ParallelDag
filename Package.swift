@@ -5,19 +5,25 @@ import PackageDescription
 
 let package = Package(
     name: "parallel_dag",
-    products: [
-        // Products define the executables and libraries a package produces, making them visible to other packages.
-        .library(
-            name: "parallel_dag",
-            targets: ["parallel_dag"]),
-    ],
-    targets: [
-        // Targets are the basic building blocks of a package, defining a module or a test suite.
-        // Targets can depend on other targets in this package and products from dependencies.
-        .target(
-            name: "parallel_dag"),
-        .testTarget(
-            name: "parallel_dagTests",
-            dependencies: ["parallel_dag"]),
+  platforms: [
+    .macOS(.v13)
+  ],
+
+    dependencies: [
+      .package(url: "https://github.com/ordo-one/package-benchmark", .upToNextMajor(from: "1.4.0")),
     ]
-)
+ )
+
+// Benchmark of ParallelDAG
+package.targets += [
+    .executableTarget(
+        name: "ParallelDAG",
+        dependencies: [
+            .product(name: "Benchmark", package: "package-benchmark"),
+        ],
+        path: "Benchmarks/ParallelDAG",
+        plugins: [
+            .plugin(name: "BenchmarkPlugin", package: "package-benchmark")
+        ]
+    ),
+]
