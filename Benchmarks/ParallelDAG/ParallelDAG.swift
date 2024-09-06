@@ -86,7 +86,11 @@ actor Operations {
   }
 
   init(_ input: [Int]) async {
-    for x in input { await q.addOperation(Op(x, in: self)) }
+    for x in input {
+      let op = await Op(x, in: self)
+      r[x] = op
+      q.addOperation(op)
+    }
   }
 
   func fib(_ x: Int) async -> Op {
@@ -132,29 +136,33 @@ func compute(_ input: [Int]) async -> [Int: Int] {
 
 let benchmarks = {
 
-  /* A hack to validate that both are computing the result.
-   Benchmark("Nothing") { benchmark in
-   let x0 = await Tasks([2, 10, 15, 6, 20, 91, 4, 5]).result.sorted {$0.key < $1.key}
-   let x1 = await Operations([2, 10, 15, 6, 20, 91, 4, 5]).result.sorted {$0.key < $1.key}
-   assert(x0.elementsEqual(x1, by: ==))
-   }
-   */
+  #if false
+  // A hack to validate that all are computing the same result.
+  Benchmark("assertions") { b in
+    let tasks = await Tasks([2, 10, 15, 6, 20, 91, 4, 5]).result.sorted(by: <)
+    let operations = await Operations([2, 10, 15, 6, 20, 91, 4, 5]).result.sorted(by: <)
+    let jaleel = await compute([2, 10, 15, 6, 20, 91, 4, 5]).sorted(by: <)
 
-    Benchmark("Tasks") { benchmark in
-      for _ in benchmark.scaledIterations {
-        blackHole(await Tasks([2, 10, 15, 6, 20, 91, 4, 5]).result)
-      }
-    }
+    if (!tasks.elementsEqual(operations, by: ==)) { fatalError("mismatch")}
+    if (!operations.elementsEqual(jaleel, by: ==))  { fatalError("mismatch")}
+  }
+  #endif
 
-    Benchmark("Operations") { benchmark in
-      for _ in benchmark.scaledIterations {
-        blackHole(await Operations([2, 10, 15, 6, 20, 91, 4, 5]).result)
-      }
+  Benchmark("Tasks") { benchmark in
+    for _ in benchmark.scaledIterations {
+      blackHole(await Tasks([2, 10, 15, 6, 20, 91, 4, 5]).result)
     }
+  }
 
-    Benchmark("Jaleel") { benchmark in
-      for _ in benchmark.scaledIterations {
-        blackHole(await compute([2, 10, 15, 6, 20, 91, 4, 5]))
-      }
+  Benchmark("Operations") { benchmark in
+    for _ in benchmark.scaledIterations {
+      blackHole(await Operations([2, 10, 15, 6, 20, 91, 4, 5]).result)
     }
+  }
+
+  Benchmark("Jaleel") { benchmark in
+    for _ in benchmark.scaledIterations {
+      blackHole(await compute([2, 10, 15, 6, 20, 91, 4, 5]))
+    }
+  }
 }
