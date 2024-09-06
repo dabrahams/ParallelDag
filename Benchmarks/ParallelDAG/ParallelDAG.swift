@@ -67,7 +67,7 @@ class Op: Operation {
   }
 
   override func main() {
-    result = x < 2 ? 0 : d1.result + d2.result
+    result = x < 2 ? 1 : d1.result + d2.result
   }
 }
 
@@ -99,7 +99,36 @@ actor Operations {
 }
 
 
-import Foundation
+
+actor Cache {
+    var r: [Int: Int] = [:]
+
+    func update(key: Int, with value: Int) {
+        self.r[key] = value
+    }
+}
+
+func compute(_ input: [Int]) async -> [Int: Int] {
+    let cache = Cache()
+
+    @discardableResult
+    func fib(_ x: Int, cache: Cache) async -> Int {
+        if let y = await cache.r[x] { return y }
+        let y = await x < 2 ? 1 : fib(x - 1, cache: cache) + fib(x - 2, cache: cache)
+        await cache.update(key: x, with: y)
+        return y
+    }
+
+    return await withTaskGroup(of: Void.self, returning: [Int: Int].self) { group in
+        for z in input {
+            group.addTask {
+                await fib(z, cache: cache)
+            }
+        }
+        await group.waitForAll()
+        return await cache.r
+    }
+}
 
 let benchmarks = {
 
@@ -120,6 +149,12 @@ let benchmarks = {
     Benchmark("Operations") { benchmark in
       for _ in benchmark.scaledIterations {
         blackHole(await Operations([2, 10, 15, 6, 20, 91, 4, 5]).result)
+      }
+    }
+
+    Benchmark("Jaleel") { benchmark in
+      for _ in benchmark.scaledIterations {
+        blackHole(await compute([2, 10, 15, 6, 20, 91, 4, 5]))
       }
     }
 }
