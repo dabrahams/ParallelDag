@@ -6,7 +6,7 @@ import PackageDescription
 let package = Package(
     name: "parallel_dag",
   platforms: [
-    .macOS(.v13)
+    .macOS(.v14)
   ],
 
     dependencies: [

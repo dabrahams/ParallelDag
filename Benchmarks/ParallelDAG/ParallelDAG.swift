@@ -285,14 +285,30 @@ func mutexCompute(_ input: [Int]) async -> [Int: Int] {
     return mutexCache.r
 }
 
+import os
 
+func osAllocatedUnfairLockCompute(_ input: [Int]) async -> [Int: Int] {
+  let cache = os.OSAllocatedUnfairLock(uncheckedState: [Int: Int]())
 
+    @Sendable
+    @discardableResult
+    func fib(_ x: Int) -> Int {
+        if let y = cache.withLock({ $0[x] }) { return y }
+        let y = x < 2 ? 1 : fib(x - 1) + fib(x - 2)
+        cache.withLock { $0[x] = y }
+        return y
+    }
 
-
-
-
-
-
+    await withTaskGroup(of: Void.self) { group in
+        for z in input {
+            group.addTask {
+                fib(z)
+            }
+        }
+        await group.waitForAll()
+    }
+    return cache.withLock { $0 }
+}
 
 
 
@@ -333,6 +349,12 @@ let benchmarks = {
   Benchmark("TaskGroupWithMutex") { benchmark in
     for _ in benchmark.scaledIterations {
       blackHole(await mutexCompute([2, 10, 15, 6, 20, 91, 4, 5]))
+    }
+  }
+
+  Benchmark("TaskGroupWithOSAllocatedUnfairLock") { benchmark in
+    for _ in benchmark.scaledIterations {
+      blackHole(await osAllocatedUnfairLockCompute([2, 10, 15, 6, 20, 91, 4, 5]))
     }
   }
 }
