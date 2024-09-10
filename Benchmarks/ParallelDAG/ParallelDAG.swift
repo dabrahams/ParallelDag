@@ -16,7 +16,7 @@ import Glibc
 /// of lock is safe to use with `libpthread`-based threading models, such as the
 /// one used by NIO. On Windows, the lock is based on the substantially similar
 /// `SRWLOCK` type.
-public final class Lock: Sendable {
+public final class Lock: @unchecked Sendable {
 #if os(Windows)
     fileprivate let mutex: UnsafeMutablePointer<SRWLOCK> =
         UnsafeMutablePointer.allocate(capacity: 1)
@@ -207,11 +207,19 @@ actor Operations {
 }
 
 actor Cache {
-    var r: [Int: Int] = [:]
+  var r: [Int: Task<Int, Never>] = [:]
 
-    func update(key: Int, with value: Int) {
-        self.r[key] = value
+  func update(key: Int, with value: Task<Int, Never>) {
+    self.r[key] = value
+  }
+
+  func getOrCreate(_ x: Int, factory: @escaping () async->Int) -> Task<Int, Never> {
+    r.getOrCreate(x) {
+      Task.detached {
+        await factory()
+      }
     }
+  }
 }
 
 func compute(_ input: [Int]) async -> [Int: Int] {
@@ -219,95 +227,68 @@ func compute(_ input: [Int]) async -> [Int: Int] {
 
     @Sendable
     @discardableResult
-    func fib(_ x: Int, cache: Cache) async -> Int {
-        if let y = await cache.r[x] { return y }
-        let y = await x < 2 ? 1 : fib(x - 1, cache: cache) + fib(x - 2, cache: cache)
-        await cache.update(key: x, with: y)
-        return y
+    func fib(_ x: Int, cache: Cache) async -> Task<Int, Never> {
+      await cache.getOrCreate(x) {
+        x < 2 ? 1 : await fib(x - 1, cache: cache).value + fib(x - 2, cache: cache).value
+      }
     }
 
-    return await withTaskGroup(of: Void.self, returning: [Int: Int].self) { group in
-        for z in input {
-            group.addTask {
-                await fib(z, cache: cache)
-            }
-        }
-        await group.waitForAll()
-        return await cache.r
-    }
+    for x in input { _ = await fib(x, cache: cache) }
+    return await cache.r.mapValuesAsync { await $0.value }
 }
 
 
-final class MutexCache: Sendable {
+final class MutexCache: @unchecked Sendable {
 
   private let mutex = Lock()
 
+  private var _r: [Int: Task<Int,Never>] = [:]
 
-  private var _r: [Int: Int] = [:]
-
-  func readR<T>(_ reader: (borrowing [Int:Int])->T) -> T {
+  func getOrCreate(_ x: Int, factory: @escaping () async->Int) -> Task<Int, Never> {
     mutex.withLock {
-      reader(_r)
+      _r.getOrCreate(x, factory: { Task.detached { await factory() } })
     }
   }
 
-  func writeR<T>(_ writer: (inout [Int:Int])->T) -> T {
-    mutex.withLock {
-      writer(&_r)
-    }
-  }
-
-  func update(key: Int, with value: Int) {
-    self.writeR{ $0[key] = value }
+  func read() -> [Int: Task<Int,Never>] {
+    mutex.withLock { _r }
   }
 }
 
 func mutexCompute(_ input: [Int]) async -> [Int: Int] {
-    let mutexCache = MutexCache()
+    let cache = MutexCache()
 
     @Sendable
     @discardableResult
-    func fib(_ x: Int, cache: MutexCache) -> Int {
-        if let y = cache.readR({ $0[x] }) { return y }
-        let y = x < 2 ? 1 : fib(x - 1, cache: cache) + fib(x - 2, cache: cache)
-        cache.writeR { $0[x] = y }
-        return y
+    func fib(_ x: Int) async -> Task<Int,Never> {
+      cache.getOrCreate(x) {
+        x < 2 ? 1 : await fib(x - 1).value + fib(x - 2).value
+      }
     }
 
-    await withTaskGroup(of: Void.self) { group in
-        for z in input {
-            group.addTask {
-                fib(z, cache: mutexCache)
-            }
-        }
-        await group.waitForAll()
-    }
-    return mutexCache.readR { $0 }
+    for x in input { _ = await fib(x) }
+    return await cache.read().mapValuesAsync { await $0.value }
 }
 
 import os
 
 func osAllocatedUnfairLockCompute(_ input: [Int]) async -> [Int: Int] {
-  let cache = os.OSAllocatedUnfairLock(uncheckedState: [Int: Int]())
+  let cache = os.OSAllocatedUnfairLock(uncheckedState: [Int: Task<Int, Never>]())
 
     @Sendable
     @discardableResult
-    func fib(_ x: Int) -> Int {
-        if let y = cache.withLock({ $0[x] }) { return y }
-        let y = x < 2 ? 1 : fib(x - 1) + fib(x - 2)
-        cache.withLock { $0[x] = y }
-        return y
+    func fib(_ x: Int) async -> Task<Int,Never> {
+      cache.withLock {
+        $0.getOrCreate(x) {
+          Task.detached {
+            x < 2 ? 1 : await fib(x - 1).value + fib(x - 2).value
+          }
+        }
+      }
     }
 
-    await withTaskGroup(of: Void.self) { group in
-        for z in input {
-            group.addTask {
-                fib(z)
-            }
-        }
-        await group.waitForAll()
-    }
-    return cache.withLock { $0 }
+    for x in input { _ = await fib(x) }
+    return await cache.withLock { $0 }.mapValuesAsync { await $0.value }
 }
 
 
@@ -340,19 +321,19 @@ let benchmarks = {
     }
   }
 
-  Benchmark("TaskGroupWithActor") { benchmark in
+  Benchmark("ActorBasedTaskCache") { benchmark in
     for _ in benchmark.scaledIterations {
       blackHole(await compute([2, 10, 15, 6, 20, 91, 4, 5]))
     }
   }
 
-  Benchmark("TaskGroupWithMutex") { benchmark in
+  Benchmark("MutexBasedTaskCache") { benchmark in
     for _ in benchmark.scaledIterations {
       blackHole(await mutexCompute([2, 10, 15, 6, 20, 91, 4, 5]))
     }
   }
 
-  Benchmark("TaskGroupWithOSAllocatedUnfairLock") { benchmark in
+  Benchmark("OSAllocatedUnfairLockBasedTaskCache") { benchmark in
     for _ in benchmark.scaledIterations {
       blackHole(await osAllocatedUnfairLockCompute([2, 10, 15, 6, 20, 91, 4, 5]))
     }
