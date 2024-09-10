@@ -217,6 +217,7 @@ actor Cache {
 func compute(_ input: [Int]) async -> [Int: Int] {
     let cache = Cache()
 
+    @Sendable
     @discardableResult
     func fib(_ x: Int, cache: Cache) async -> Int {
         if let y = await cache.r[x] { return y }
@@ -244,21 +245,20 @@ final class MutexCache: Sendable {
 
   private var _r: [Int: Int] = [:]
 
-  var r: [Int: Int] {
-    _read {
-      mutex.lock()
-      yield _r
-      mutex.unlock()
+  func readR<T>(_ reader: (borrowing [Int:Int])->T) -> T {
+    mutex.withLock {
+      reader(_r)
     }
-    _modify {
-      mutex.lock()
-      yield &_r
-      mutex.unlock()
+  }
+
+  func writeR<T>(_ writer: (inout [Int:Int])->T) -> T {
+    mutex.withLock {
+      writer(&_r)
     }
   }
 
   func update(key: Int, with value: Int) {
-    self.r[key] = value
+    self.writeR{ $0[key] = value }
   }
 }
 
@@ -268,9 +268,9 @@ func mutexCompute(_ input: [Int]) async -> [Int: Int] {
     @Sendable
     @discardableResult
     func fib(_ x: Int, cache: MutexCache) -> Int {
-        if let y = cache.r[x] { return y }
+        if let y = cache.readR({ $0[x] }) { return y }
         let y = x < 2 ? 1 : fib(x - 1, cache: cache) + fib(x - 2, cache: cache)
-        cache.r[x] = y
+        cache.writeR { $0[x] = y }
         return y
     }
 
@@ -282,7 +282,7 @@ func mutexCompute(_ input: [Int]) async -> [Int: Int] {
         }
         await group.waitForAll()
     }
-    return mutexCache.r
+    return mutexCache.readR { $0 }
 }
 
 import os
