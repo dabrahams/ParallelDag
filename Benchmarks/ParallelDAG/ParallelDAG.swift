@@ -16,7 +16,9 @@ import Glibc
 /// of lock is safe to use with `libpthread`-based threading models, such as the
 /// one used by NIO. On Windows, the lock is based on the substantially similar
 /// `SRWLOCK` type.
-public final class Lock: @unchecked Sendable {
+public final class Lock<Protected>: @unchecked Sendable {
+  var _protected: Protected
+
 #if os(Windows)
     fileprivate let mutex: UnsafeMutablePointer<SRWLOCK> =
         UnsafeMutablePointer.allocate(capacity: 1)
@@ -26,56 +28,58 @@ public final class Lock: @unchecked Sendable {
 #endif
 
     /// Create a new lock.
-    public init() {
-#if os(Windows)
-        InitializeSRWLock(self.mutex)
-#else
-        var attr = pthread_mutexattr_t()
-        pthread_mutexattr_init(&attr)
-//        debugOnly {
-//            pthread_mutexattr_settype(&attr, .init(PTHREAD_MUTEX_ERRORCHECK))
-//        }
+public init(_ x: Protected) {
+  _protected = x
 
-        let err = pthread_mutex_init(self.mutex, &attr)
-        precondition(err == 0, "\(#function) failed in pthread_mutex with error \(err)")
-#endif
-    }
+  #if os(Windows)
+  InitializeSRWLock(self.mutex)
+  #else
+  var attr = pthread_mutexattr_t()
+  pthread_mutexattr_init(&attr)
+  //        debugOnly {
+  //            pthread_mutexattr_settype(&attr, .init(PTHREAD_MUTEX_ERRORCHECK))
+  //        }
 
-    deinit {
-#if os(Windows)
-        // SRWLOCK does not need to be free'd
-#else
-        let err = pthread_mutex_destroy(self.mutex)
-        precondition(err == 0, "\(#function) failed in pthread_mutex with error \(err)")
-#endif
-        mutex.deallocate()
-    }
+  let err = pthread_mutex_init(self.mutex, &attr)
+  precondition(err == 0, "\(#function) failed in pthread_mutex with error \(err)")
+  #endif
+}
 
-    /// Acquire the lock.
-    ///
-    /// Whenever possible, consider using `withLock` instead of this method and
-    /// `unlock`, to simplify lock handling.
-    public func lock() {
-#if os(Windows)
-        AcquireSRWLockExclusive(self.mutex)
-#else
-        let err = pthread_mutex_lock(self.mutex)
-        precondition(err == 0, "\(#function) failed in pthread_mutex with error \(err)")
-#endif
-    }
+deinit {
+  #if os(Windows)
+  // SRWLOCK does not need to be free'd
+  #else
+  let err = pthread_mutex_destroy(self.mutex)
+  precondition(err == 0, "\(#function) failed in pthread_mutex with error \(err)")
+  #endif
+  mutex.deallocate()
+}
 
-    /// Release the lock.
-    ///
-    /// Whenver possible, consider using `withLock` instead of this method and
-    /// `lock`, to simplify lock handling.
-    public func unlock() {
-#if os(Windows)
-        ReleaseSRWLockExclusive(self.mutex)
-#else
-        let err = pthread_mutex_unlock(self.mutex)
-        precondition(err == 0, "\(#function) failed in pthread_mutex with error \(err)")
-#endif
-    }
+/// Acquire the lock.
+///
+/// Whenever possible, consider using `withLock` instead of this method and
+/// `unlock`, to simplify lock handling.
+private func lock() {
+  #if os(Windows)
+  AcquireSRWLockExclusive(self.mutex)
+  #else
+  let err = pthread_mutex_lock(self.mutex)
+  precondition(err == 0, "\(#function) failed in pthread_mutex with error \(err)")
+  #endif
+}
+
+/// Release the lock.
+///
+/// Whenver possible, consider using `withLock` instead of this method and
+/// `lock`, to simplify lock handling.
+private func unlock() {
+  #if os(Windows)
+  ReleaseSRWLockExclusive(self.mutex)
+  #else
+  let err = pthread_mutex_unlock(self.mutex)
+  precondition(err == 0, "\(#function) failed in pthread_mutex with error \(err)")
+  #endif
+}
 }
 
 extension Lock {
@@ -87,18 +91,16 @@ extension Lock {
     ///
     /// - Parameter body: The block to execute while holding the lock.
     /// - Returns: The value returned by the block.
-    @inlinable
-    public func withLock<T>(_ body: () throws -> T) rethrows -> T {
+    public func withLock<T>(_ body: (inout Protected) throws -> T) rethrows -> T {
         self.lock()
         defer {
             self.unlock()
         }
-        return try body()
+        return try body(&_protected)
     }
 
     // specialise Void return (for performance)
-    @inlinable
-    public func withLockVoid(_ body: () throws -> Void) rethrows -> Void {
+    public func withLockVoid(_ body: (inout Protected) throws -> Void) rethrows -> Void {
         try self.withLock(body)
     }
 }
@@ -227,47 +229,34 @@ func compute(_ input: [Int]) async -> [Int: Int] {
 
     @Sendable
     @discardableResult
-    func fib(_ x: Int, cache: Cache) async -> Task<Int, Never> {
+    func fib(_ x: Int) async -> Task<Int, Never> {
       await cache.getOrCreate(x) {
-        x < 2 ? 1 : await fib(x - 1, cache: cache).value + fib(x - 2, cache: cache).value
-      }
-    }
-
-    for x in input { _ = await fib(x, cache: cache) }
-    return await cache.r.mapValuesAsync { await $0.value }
-}
-
-
-final class MutexCache: @unchecked Sendable {
-
-  private let mutex = Lock()
-
-  private var _r: [Int: Task<Int,Never>] = [:]
-
-  func getOrCreate(_ x: Int, factory: @escaping () async->Int) -> Task<Int, Never> {
-    mutex.withLock {
-      _r.getOrCreate(x, factory: { Task.detached { await factory() } })
-    }
-  }
-
-  func read() -> [Int: Task<Int,Never>] {
-    mutex.withLock { _r }
-  }
-}
-
-func mutexCompute(_ input: [Int]) async -> [Int: Int] {
-    let cache = MutexCache()
-
-    @Sendable
-    @discardableResult
-    func fib(_ x: Int) async -> Task<Int,Never> {
-      cache.getOrCreate(x) {
         x < 2 ? 1 : await fib(x - 1).value + fib(x - 2).value
       }
     }
 
     for x in input { _ = await fib(x) }
-    return await cache.read().mapValuesAsync { await $0.value }
+    return await cache.r.mapValuesAsync { await $0.value }
+}
+
+
+func mutexCompute(_ input: [Int]) async -> [Int: Int] {
+    let cache = Lock([Int: Task<Int,Never>]())
+
+    @Sendable
+    @discardableResult
+    func fib(_ x: Int) async -> Task<Int,Never> {
+      cache.withLock {
+        $0.getOrCreate(x) {
+          Task.detached {
+            x < 2 ? 1 : await fib(x - 1).value + fib(x - 2).value
+          }
+        }
+      }
+    }
+
+    for x in input { _ = await fib(x) }
+    return await cache.withLock { $0 }.mapValuesAsync { await $0.value }
 }
 
 import os
