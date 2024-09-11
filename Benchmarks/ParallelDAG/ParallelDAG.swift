@@ -280,7 +280,46 @@ func osAllocatedUnfairLockCompute(_ input: [Int]) async -> [Int: Int] {
     return await cache.withLock { $0 }.mapValuesAsync { await $0.value }
 }
 
+final class GCDProtected<T> {
+  private var protected: T
+  private let q = DispatchQueue(label: "GCDProtected", attributes: .concurrent)
+  init(_ x: T) { protected = x }
 
+  func read<R>(into reader:(borrowing T)->R) -> R {
+    q.sync {
+      reader(protected)
+    }
+  }
+
+  func write<R>(via writer:(inout T)->R) -> R {
+    q.asyncAndWait(flags: .barrier) {
+      writer(&protected)
+    }
+  }
+}
+
+func gcdCompute(_ input: [Int]) async -> [Int: Int] {
+  let cache = GCDProtected([Int: Task<Int, Never>]())
+
+    @Sendable
+    @discardableResult
+    func fib(_ x: Int) async -> Task<Int,Never> {
+      // Uncommenting the next line simulates a non-upgradable
+      // reader-writer lock.  It's actually a slowdown.
+
+      // if let r = cache.read(into: { $0[x] }) { return r }
+      return cache.write {
+        $0.getOrCreate(x) {
+          Task.detached {
+            x < 2 ? 1 : await fib(x - 1).value + fib(x - 2).value
+          }
+        }
+      }
+    }
+
+    for x in input { _ = await fib(x) }
+    return await cache.read { $0 }.mapValuesAsync { await $0.value }
+}
 
 
 
@@ -325,6 +364,12 @@ let benchmarks = {
   Benchmark("OSAllocatedUnfairLockBasedTaskCache") { benchmark in
     for _ in benchmark.scaledIterations {
       blackHole(await osAllocatedUnfairLockCompute([2, 10, 15, 6, 20, 91, 4, 5]))
+    }
+  }
+
+  Benchmark("GCDBasedTaskCache") { benchmark in
+    for _ in benchmark.scaledIterations {
+      blackHole(await gcdCompute([2, 10, 15, 6, 20, 91, 4, 5]))
     }
   }
 }
