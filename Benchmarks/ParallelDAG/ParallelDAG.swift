@@ -105,6 +105,64 @@ extension Lock {
     }
 }
 
+
+/// A read/write lock based on `libpthread`
+public final class RWLock<Protected>: @unchecked Sendable {
+  var _protected: Protected
+
+    fileprivate let mutex: UnsafeMutablePointer<pthread_rwlock_t> =
+        UnsafeMutablePointer.allocate(capacity: 1)
+
+    /// Create a new lock.
+public init(_ x: Protected) {
+  _protected = x
+
+  #if os(Windows)
+  InitializeSRWLock(self.mutex)
+  #else
+  var attr = pthread_rwlock_t()
+  pthread_rwlock_init(self.mutex, nil)
+  //        debugOnly {
+  //            pthread_mutexattr_settype(&attr, .init(PTHREAD_MUTEX_ERRORCHECK))
+  //        }
+
+  #endif
+}
+
+deinit {
+  #if os(Windows)
+  // SRWLOCK does not need to be free'd
+  #else
+  let err = pthread_rwlock_destroy(self.mutex)
+  precondition(err == 0, "\(#function) failed in pthread_mutex with error \(err)")
+  #endif
+  mutex.deallocate()
+}
+}
+
+extension RWLock {
+    /// Acquire the lock for the duration of the given block.
+    ///
+    /// This convenience method should be preferred to `lock` and `unlock` in
+    /// most situations, as it ensures that the lock will be released regardless
+    /// of how `body` exits.
+    ///
+    /// - Parameter body: The block to execute while holding the lock.
+    /// - Returns: The value returned by the block.
+    public func write<T>(_ body: (inout Protected) throws -> T) rethrows -> T {
+        pthread_rwlock_wrlock(mutex)
+        defer { pthread_rwlock_unlock(mutex) }
+        return try body(&_protected)
+    }
+
+    public func read<T>(_ body: (borrowing Protected) throws -> T) rethrows -> T {
+        pthread_rwlock_rdlock(mutex)
+        defer { pthread_rwlock_unlock(mutex) }
+        return try body(_protected)
+    }
+}
+
+
 import Benchmark
 import Foundation
 
@@ -259,6 +317,26 @@ func mutexCompute(_ input: [Int]) async -> [Int: Int] {
     return await cache.withLock { $0 }.mapValuesAsync { await $0.value }
 }
 
+func rwLockCompute(_ input: [Int]) async -> [Int: Int] {
+    let cache = RWLock([Int: Task<Int,Never>]())
+
+    @Sendable
+    @discardableResult
+    func fib(_ x: Int) async -> Task<Int,Never> {
+      if let r = cache.read({ $0[x] }) { return r }
+      return cache.write {
+        $0.getOrCreate(x) {
+          Task.detached {
+            x < 2 ? 1 : await fib(x - 1).value + fib(x - 2).value
+          }
+        }
+      }
+    }
+
+    for x in input { _ = await fib(x) }
+    return await cache.read { $0 }.mapValuesAsync { await $0.value }
+}
+
 import os
 
 func osAllocatedUnfairLockCompute(_ input: [Int]) async -> [Int: Int] {
@@ -370,6 +448,12 @@ let benchmarks = {
   Benchmark("GCDBasedTaskCache") { benchmark in
     for _ in benchmark.scaledIterations {
       blackHole(await gcdCompute([2, 10, 15, 6, 20, 91, 4, 5]))
+    }
+  }
+
+  Benchmark("ReadWriteLock") { benchmark in
+    for _ in benchmark.scaledIterations {
+      blackHole(await rwLockCompute([2, 10, 15, 6, 20, 91, 4, 5]))
     }
   }
 }
